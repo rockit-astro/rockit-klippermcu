@@ -1,0 +1,71 @@
+name: RPM Packaging
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  x86_64:
+    name: RPM Packaging (x86_64)
+    runs-on: ubuntu-22.04
+    container: rockylinux:9
+    steps:
+      - name: Install Dependencies
+        run: |
+          cat /etc/redhat-release
+          yum -y install epel-release
+          /usr/bin/crb enable
+          yum -y install gcc git rpm-build rpm-sign rsync make python3-rpm-macros pyproject-rpm-macros python3-devel python3-tomli systemd-rpm-macros python3-wheel
+
+      - name: Clone Repository
+        uses: actions/checkout@v4
+
+      - name: Package RPMs
+        run:
+          make package
+
+      - name: Clone Package Repository
+        uses: actions/checkout@v4
+        with:
+          repository: rockit-astro/packages
+          token: ${{ secrets.DEPLOY_TOKEN }}
+          path: packages
+
+      - name: Push Packages
+        env:
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
+        run:
+          packages/sign-and-push-packages.sh *.rpm
+
+  aarch64:
+    name: RPM Packaging (aarch64)
+    runs-on: ubuntu-22.04-arm
+    container: rockylinux:9
+    steps:
+      - name: Install Dependencies
+        run: |
+          cat /etc/redhat-release
+          yum -y install epel-release
+          /usr/bin/crb enable
+          yum -y install gcc git rpm-build rpm-sign rsync make python3-rpm-macros pyproject-rpm-macros python3-devel python3-tomli systemd-rpm-macros python3-wheel
+
+      - name: Clone Repository
+        uses: actions/checkout@v4
+
+      - name: Package RPMs
+        run:
+          make package
+
+      - name: Clone Package Repository
+        uses: actions/checkout@v4
+        with:
+          repository: rockit-astro/packages
+          token: ${{ secrets.DEPLOY_TOKEN }}
+          path: packages
+
+      - name: Push Packages
+        env:
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
+        run:
+          packages/sign-and-push-packages.sh *.rpm
