@@ -16,10 +16,13 @@
 
 """Logic to control a stepper motor using the Klipper MCU API"""
 
+import collections
+import sys
 import threading
+import traceback
 import numpy as np
 
-HOMING_START_DELAY = 0.1
+START_DELAY = 0.1
 ENDSTOP_SAMPLE_TIME = .000015
 ENDSTOP_SAMPLE_COUNT = 4
 
@@ -88,6 +91,10 @@ class Stepper:
         self._pos_steps = 0
         self._stopped = False
 
+        self._track_lock = threading.Lock()
+        self._track_thread = None
+        self._track_status = collections.deque()
+
         self._uart = None
         if 'tmc_uart' in self._config:
             self._uart = uarts[self._config['tmc_uart']['uart']]
@@ -97,6 +104,9 @@ class Stepper:
 
     @property
     def status(self):
+        if self._track_thread is not None and self._track_thread.is_alive() and len(self._track_status):
+            return self._track_status[0][1]
+
         return self._status
 
     @property
@@ -186,7 +196,153 @@ class Stepper:
 
         return inner, total_time, accel_time, coast_time, decel_time
 
+    def _update_track_thread(self, track_func):
+        start_time = self._mcu.host_clock() + START_DELAY
+        start_clock = self._mcu.host_clock_to_mcu_clock(start_time)
+        _, enable_invert, _ = parse_pin(self._config['enable_pin'])
+        if self._uart is None:
+            self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
+                                   on_ticks=enable_invert)
+        self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
+        self._mcu.send_command('trsync_start', oid=self._trigger_oid,
+                               report_clock=0, report_ticks=0,
+                               expire_reason=TRIGGER_TIMEOUT)
+        self._mcu.send_command('stepper_stop_on_trigger', oid=self._stepper_oid, trsync_oid=self._trigger_oid)
+
+        tdt = self._config['tracking_cadence']
+        pos_min = self._config['position_min']
+        pos_max = self._config['position_max']
+
+        wait_condition = threading.Condition()
+        self._status = StepperStatus.Tracking
+
+        # Calculated track state
+        track_segments = collections.deque()
+        start_pos = self.position
+        start_vel = 0
+
+        # Committed track state
+        last_committed = (start_clock, self._pos_steps, None)
+
+        try:
+            while not self._stopped:
+                loop_start_time = self._mcu.host_clock()
+
+                # Expire stale tracking status
+                while len(self._track_status) and self._track_status[0][0] < loop_start_time:
+                    self._track_status.popleft()
+
+                # Calculate more track if needed
+                with self._track_lock:
+                    next_committed = self._mcu.host_clock() + self._config['tracking_commit_buffer']
+                    while start_time < next_committed:
+                        end_time = start_time + tdt
+                        end_pos = np.clip(track_func(end_time), pos_min, pos_max)
+
+                        tracking_vel = (end_pos - start_pos) / tdt
+                        if abs(tracking_vel - start_vel) < self._config['acceleration'] * tdt:
+                            # We are tracking the target
+                            track_segments.append((start_time, end_time, end_pos, StepperStatus.Tracking))
+                            start_time = end_time
+                            start_pos = end_pos
+                            start_vel = tracking_vel
+                            continue
+
+                        converge_pos, converge_vel = end_pos, start_vel
+                        for _ in range(25):
+                            move_fn, move_time, *_ = self._build_trapezoidal_move(
+                                start_time, start_pos, start_vel, converge_pos, converge_vel)
+
+                            move_steps = int(np.ceil(move_time / tdt))
+                            while True:
+                                after_move_start_pos = np.clip(track_func(start_time + move_steps * tdt),
+                                                               pos_min, pos_max)
+                                after_move_end_pos = np.clip(track_func(start_time + (move_steps + 1) * tdt),
+                                                             pos_min, pos_max)
+                                after_move_tracking_vel = (after_move_end_pos - after_move_start_pos) / tdt
+                                if abs(after_move_tracking_vel) < self._config['speed']:
+                                    break
+
+                                move_steps += 1
+
+                            if abs(after_move_start_pos - converge_pos) < 1 / self._steps_per_distance:
+                                break
+
+                            converge_pos, converge_vel = after_move_start_pos, after_move_tracking_vel
+
+                        for i in range(move_steps):
+                            move_start_time = start_time + i * tdt
+                            move_end_time = move_start_time + tdt
+                            move_start_pos = move_fn(move_start_time)
+                            move_end_pos = move_fn(move_end_time)
+                            track_segments.append((move_start_time, move_end_time, move_end_pos, StepperStatus.Moving))
+
+                        start_time = move_end_time
+                        start_pos = move_end_pos
+                        start_vel = (move_end_pos - move_start_pos) / tdt
+
+                # Commit track segments to the MCU
+                while len(track_segments) and track_segments[0][0] < next_committed:
+                    last_clock, last_steps, last_dir = last_committed
+                    seg_start_time, seg_end_time, seg_end_pos, seg_status = track_segments.popleft()
+                    self._track_status.append((seg_end_time, seg_status))
+
+                    seg_end_steps = int(seg_end_pos * self._steps_per_distance + self._pos_steps_at_origin + 0.5)
+                    count = abs(seg_end_steps - last_steps)
+                    if count == 0:
+                        continue
+
+                    start_clock = self._mcu.host_clock_to_mcu_clock(seg_start_time)
+                    end_clock = self._mcu.host_clock_to_mcu_clock(seg_end_time)
+                    interval = 0
+
+                    step_dir = 1 if seg_end_steps >= last_steps else 0
+                    step_sign = 1 if seg_end_steps >= last_steps else -1
+                    if step_dir != last_dir:
+                        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir)
+
+                    # Reset step clock if we have been paused, allowing
+                    # for small rounding errors from the last segment
+                    if start_clock - last_clock > (end_clock - start_clock) / count:
+                        if count == 1:
+                            self._mcu.send_command('queue_step', oid=self._stepper_oid,
+                                                   interval=end_clock - last_clock, count=1, add=0)
+                            last_clock = end_clock
+                        else:
+                            self._mcu.send_command('queue_step', oid=self._stepper_oid,
+                                                   interval=start_clock - last_clock, count=1, add=0)
+                            last_clock = start_clock
+
+                        last_steps += step_sign
+                        count -= 1
+
+                    if count > 0:
+                        interval = int((end_clock - last_clock) / count)
+                        self._mcu.send_command('queue_step', oid=self._stepper_oid,
+                                               interval=interval, count=count, add=0)
+
+                    last_committed = (last_clock + count * interval, last_steps + step_sign * count, step_dir)
+
+                self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
+                with wait_condition:
+                    delay = 0.25 * self._config['tracking_cadence'] - (self._mcu.host_clock() - loop_start_time)
+                    if delay > 0:
+                        wait_condition.wait(delay)
+        except Exception:
+            print('exception in track thread')
+            traceback.print_exc(file=sys.stdout)
+
+        self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
+        self._status = StepperStatus.Idle
+        if self._uart is None:
+            disable_clock = self._mcu.host_clock_to_mcu_clock(self._mcu.host_clock() + 0.1)
+            self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=disable_clock,
+                                   on_ticks=not enable_invert)
+
     def _move(self, distance, speed, check_endstop=False, check_limits=True):
+        if self._track_thread is not None:
+            raise Exception('Cannot issue move commands while tracking is active')
+
         if check_limits:
             self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
             distance = min(max(self.position + distance, self._config['position_min']),
@@ -194,7 +350,7 @@ class Stepper:
             if distance == 0:
                 return TRIGGER_TIMEOUT
 
-        start_time = self._mcu.host_clock() + HOMING_START_DELAY
+        start_time = self._mcu.host_clock() + START_DELAY
         start_clock = self._mcu.host_clock_to_mcu_clock(start_time)
         step_dir = 1 if distance * speed > 0 else 0
 
@@ -317,6 +473,19 @@ class Stepper:
             inner()
         else:
             threading.Thread(target=inner).start()
+
+    def track(self, track_func):
+        with self._track_lock:
+            if self._track_thread is not None:
+                self.stop()
+                self._track_thread.join()
+
+            if track_func is not None:
+                self._stopped = False
+                self._track_thread = threading.Thread(target=self._update_track_thread, args=(track_func,))
+                self._track_thread.start()
+            else:
+                self._track_thread = None
 
     def stop(self):
         self._stopped = True
