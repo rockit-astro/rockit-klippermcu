@@ -64,29 +64,61 @@ class StepperStatus:
             return cls._labels[status]
         return 'UNKNOWN'
 
-def parse_pin(value):
+def parse_pin(value, parse_pullup=False, parse_invert=False):
     pullup = invert = 0
-    if value[0] in ['^', '~']:
-        pullup = -1 if value[0] == '~' else 1
-        value = value[1:]
+    if len(value) > 0:
+        if value[0] in ['^', '~']:
+            pullup = -1 if value[0] == '~' else 1
+            value = value[1:]
 
-    if value[0] == '!':
-        invert = 1
-        value = value[1:]
-    return pullup, invert, value
+        if value[0] == '!':
+            invert = 1
+            value = value[1:]
+
+    ret = []
+    if parse_pullup:
+        ret.append(pullup)
+    if parse_invert:
+        ret.append(invert)
+    ret.append(value)
+
+    return ret[0] if len(ret) == 1 else ret
 
 
 class Stepper:
-    def __init__(self, config_json, mcu, uarts):
-        self._status = StepperStatus.NotHomed
-        self._config = config_json
-        self._steps_per_distance = self._config['rotation_microsteps'] / self._config['rotation_distance']
+    def __init__(self, mcu, uart, rotation_microsteps, rotation_distance,
+                 step_pin, dir_pin, enable_pin, endstop_pin,
+                 uart_address, uart_microsteps, uart_run_current,
+                 speed, acceleration, tracking_cadence, tracking_commit_buffer,
+                 position_min, position_max, homing_backoff):
+
         self._mcu = mcu
-        self._mcu_freq = 0
+        self._uart = uart
+        self._uart_address = uart_address
+        self._uart_microsteps = uart_microsteps
+        self._uart_run_current = uart_run_current
+
+        self._step_pin = parse_pin(step_pin)
+        self._dir_pin = parse_pin(dir_pin)
+        self._enable_pin_invert, self._enable_pin = parse_pin(enable_pin, parse_invert=True)
+        self._endstop_pin_pullup, self._endstop_pin_invert, self._endstop_pin = parse_pin(
+            endstop_pin, parse_pullup=True, parse_invert=True)
+
         self._stepper_oid = mcu.reserve_oid()
         self._enable_oid = mcu.reserve_oid()
         self._trigger_oid = mcu.reserve_oid()
-        self._endstop_oid = mcu.reserve_oid() if self.has_endstop else -1
+        self._endstop_oid = mcu.reserve_oid() if endstop_pin is not None else -1
+
+        self._speed = speed
+        self._acceleration = acceleration
+        self._steps_per_distance = rotation_microsteps / rotation_distance
+        self._tracking_cadence = tracking_cadence
+        self._tracking_commit_buffer = tracking_commit_buffer
+        self._position_min = position_min
+        self._position_max = position_max
+        self._homing_backoff = homing_backoff
+
+        self._status = StepperStatus.NotHomed
         self._pos_steps_at_origin = 0
         self._pos_steps = 0
         self._stopped = False
@@ -94,10 +126,6 @@ class Stepper:
         self._track_lock = threading.Lock()
         self._track_thread = None
         self._track_status = collections.deque()
-
-        self._uart = None
-        if 'tmc_uart' in self._config:
-            self._uart = uarts[self._config['tmc_uart']['uart']]
 
         mcu.register_init_callback(self._configure)
         mcu.register_post_init_callback(self._post_configure)
@@ -115,14 +143,10 @@ class Stepper:
 
     @property
     def has_endstop(self):
-        return 'endstop_pin' in self._config
+        return self._endstop_pin is not None
 
     def _configure(self):
-        _, _, step_pin = parse_pin(self._config['step_pin'])
-        _, _, dir_pin = parse_pin(self._config['dir_pin'])
-        _, enable_invert, enable_pin = parse_pin(self._config['enable_pin'])
-
-        step_pulse_ticks = int(.000002 * self._mcu_freq)
+        step_pulse_ticks = int(.000002 * self._mcu.mcu_freq)
         invert_step = 0
         sbe = int(self._mcu.msgparser.get_constant_int('STEPPER_BOTH_EDGE', '0'))
         if self._uart is not None and sbe:
@@ -130,28 +154,25 @@ class Stepper:
             step_pulse_ticks = 0
 
         self._mcu.send_command('config_stepper', oid=self._stepper_oid,
-                       step_pin=step_pin, dir_pin=dir_pin,
-                       invert_step=invert_step, step_pulse_ticks=step_pulse_ticks)
+                               step_pin=self._step_pin, dir_pin=self._dir_pin,
+                               invert_step=invert_step, step_pulse_ticks=step_pulse_ticks)
 
         # Set idle powerdown via the uart if available
         # Otherwise manually enable stepper only while moving
         disable_on_idle = int(self._uart is None)
         self._mcu.send_command('config_digital_out', oid=self._enable_oid,
-                       pin=enable_pin, value=int(not enable_invert ^ disable_on_idle),
-                       default_value=enable_invert, max_duration=0)
+                       pin=self._enable_pin, value=int(not self._enable_pin_invert ^ disable_on_idle),
+                       default_value=self._enable_pin_invert, max_duration=0)
         self._mcu.send_command('config_trsync', oid=self._trigger_oid)
 
         if self.has_endstop:
-            endstop_pullup, _, endstop_pin = parse_pin(self._config['endstop_pin'])
             self._mcu.send_command('config_endstop', oid=self._endstop_oid,
-                                   pin=endstop_pin, pull_up=endstop_pullup)
+                                   pin=self._endstop_pin, pull_up=self._endstop_pin_pullup)
 
     def _post_configure(self):
         self._status = StepperStatus.NotHomed if self.has_endstop else StepperStatus.Idle
-        self._mcu_freq = self._mcu.msgparser.get_constant_float('CLOCK_FREQ')
         if self._uart is not None:
-            c = self._config['tmc_uart']
-            self._uart.configure_stepper(c['address'], c['microsteps'], c['run_current'])
+            self._uart.configure_stepper(self._uart_address, self._uart_microsteps, self._uart_run_current)
 
     def _build_trapezoidal_move(self, start_time, start_pos, start_vel, end_pos, end_vel, speed=None):
         distance = abs(end_pos - start_pos)
@@ -159,17 +180,17 @@ class Stepper:
             return lambda t: start_pos, 0, 0, 0, 0
 
         if speed is None:
-            speed = self._config['speed']
+            speed = self._speed
 
         sign = 1 if end_pos >= start_pos else -1
         start_vel *= sign
         end_vel *= sign
 
-        coast_speed = min(speed, np.sqrt(0.5 * distance * self._config['acceleration']))
-        accel_time = abs(coast_speed - start_vel) / self._config['acceleration']
-        accel_distance = start_vel * accel_time + 0.5 * self._config['acceleration'] * accel_time ** 2
-        decel_time = abs(end_vel - coast_speed) / self._config['acceleration']
-        decel_distance = end_vel * decel_time + 0.5 * self._config['acceleration'] * decel_time ** 2
+        coast_speed = min(speed, np.sqrt(0.5 * distance * self._acceleration))
+        accel_time = abs(coast_speed - start_vel) / self._acceleration
+        accel_distance = start_vel * accel_time + 0.5 * self._acceleration * accel_time ** 2
+        decel_time = abs(end_vel - coast_speed) / self._acceleration
+        decel_distance = end_vel * decel_time + 0.5 * self._acceleration * decel_time ** 2
 
         coast_distance = distance - accel_distance - decel_distance
         coast_time = coast_distance / coast_speed
@@ -187,10 +208,10 @@ class Stepper:
 
             tmdt = total_time - dt
             offset = np.zeros_like(t)
-            offset[accel_filt] = start_vel * dt[accel_filt] + 0.5 * self._config['acceleration'] * dt[accel_filt] ** 2
+            offset[accel_filt] = start_vel * dt[accel_filt] + 0.5 * self._acceleration * dt[accel_filt] ** 2
             offset[coast_filt] = (dt[coast_filt] - accel_time) * coast_speed + accel_distance
             offset[decel_filt] = (distance - end_vel * tmdt[decel_filt]
-                                  - 0.5 * self._config['acceleration'] * tmdt[decel_filt] ** 2)
+                                  - 0.5 * self._acceleration * tmdt[decel_filt] ** 2)
             offset[after_filt] = distance
             return start_pos + sign * offset
 
@@ -199,19 +220,15 @@ class Stepper:
     def _update_track_thread(self, track_func):
         start_time = self._mcu.host_clock() + START_DELAY
         start_clock = self._mcu.host_clock_to_mcu_clock(start_time)
-        _, enable_invert, _ = parse_pin(self._config['enable_pin'])
+
         if self._uart is None:
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
-                                   on_ticks=enable_invert)
+                                   on_ticks=self._enable_pin_invert)
         self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
         self._mcu.send_command('trsync_start', oid=self._trigger_oid,
                                report_clock=0, report_ticks=0,
                                expire_reason=TRIGGER_TIMEOUT)
         self._mcu.send_command('stepper_stop_on_trigger', oid=self._stepper_oid, trsync_oid=self._trigger_oid)
-
-        tdt = self._config['tracking_cadence']
-        pos_min = self._config['position_min']
-        pos_max = self._config['position_max']
 
         wait_condition = threading.Condition()
         self._status = StepperStatus.Tracking
@@ -234,13 +251,13 @@ class Stepper:
 
                 # Calculate more track if needed
                 with self._track_lock:
-                    next_committed = self._mcu.host_clock() + self._config['tracking_commit_buffer']
+                    next_committed = self._mcu.host_clock() + self._tracking_commit_buffer
                     while start_time < next_committed:
-                        end_time = start_time + tdt
-                        end_pos = np.clip(track_func(end_time), pos_min, pos_max)
+                        end_time = start_time + self._tracking_cadence
+                        end_pos = np.clip(track_func(end_time), self._position_min, self._position_max)
 
-                        tracking_vel = (end_pos - start_pos) / tdt
-                        if abs(tracking_vel - start_vel) < self._config['acceleration'] * tdt:
+                        tracking_vel = (end_pos - start_pos) / self._tracking_cadence
+                        if abs(tracking_vel - start_vel) < self._acceleration * self._tracking_cadence:
                             # We are tracking the target
                             track_segments.append((start_time, end_time, end_pos, StepperStatus.Tracking))
                             start_time = end_time
@@ -253,14 +270,16 @@ class Stepper:
                             move_fn, move_time, *_ = self._build_trapezoidal_move(
                                 start_time, start_pos, start_vel, converge_pos, converge_vel)
 
-                            move_steps = int(np.ceil(move_time / tdt))
+                            move_steps = int(np.ceil(move_time / self._tracking_cadence))
                             while True:
-                                after_move_start_pos = np.clip(track_func(start_time + move_steps * tdt),
-                                                               pos_min, pos_max)
-                                after_move_end_pos = np.clip(track_func(start_time + (move_steps + 1) * tdt),
-                                                             pos_min, pos_max)
-                                after_move_tracking_vel = (after_move_end_pos - after_move_start_pos) / tdt
-                                if abs(after_move_tracking_vel) < self._config['speed']:
+                                after_move_start_pos = np.clip(
+                                    track_func(start_time + move_steps * self._tracking_cadence),
+                                    self._position_min, self._position_max)
+                                after_move_end_pos = np.clip(
+                                    track_func(start_time + (move_steps + 1) * self._tracking_cadence),
+                                    self._position_min, self._position_max)
+                                after_move_vel = (after_move_end_pos - after_move_start_pos) / self._tracking_cadence
+                                if abs(after_move_vel) < self._speed:
                                     break
 
                                 move_steps += 1
@@ -268,18 +287,18 @@ class Stepper:
                             if abs(after_move_start_pos - converge_pos) < 1 / self._steps_per_distance:
                                 break
 
-                            converge_pos, converge_vel = after_move_start_pos, after_move_tracking_vel
+                            converge_pos, converge_vel = after_move_start_pos, after_move_vel
 
                         for i in range(move_steps):
-                            move_start_time = start_time + i * tdt
-                            move_end_time = move_start_time + tdt
+                            move_start_time = start_time + i * self._tracking_cadence
+                            move_end_time = move_start_time + self._tracking_cadence
                             move_start_pos = move_fn(move_start_time)
                             move_end_pos = move_fn(move_end_time)
                             track_segments.append((move_start_time, move_end_time, move_end_pos, StepperStatus.Moving))
 
                         start_time = move_end_time
                         start_pos = move_end_pos
-                        start_vel = (move_end_pos - move_start_pos) / tdt
+                        start_vel = (move_end_pos - move_start_pos) / self._tracking_cadence
 
                 # Commit track segments to the MCU
                 while len(track_segments) and track_segments[0][0] < next_committed:
@@ -325,7 +344,7 @@ class Stepper:
 
                 self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
                 with wait_condition:
-                    delay = 0.25 * self._config['tracking_cadence'] - (self._mcu.host_clock() - loop_start_time)
+                    delay = 0.25 * self._tracking_cadence - (self._mcu.host_clock() - loop_start_time)
                     if delay > 0:
                         wait_condition.wait(delay)
         except Exception:
@@ -337,7 +356,7 @@ class Stepper:
         if self._uart is None:
             disable_clock = self._mcu.host_clock_to_mcu_clock(self._mcu.host_clock() + 0.1)
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=disable_clock,
-                                   on_ticks=not enable_invert)
+                                   on_ticks=not self._enable_pin_invert)
 
     def _move(self, distance, speed, check_endstop=False, check_limits=True):
         if self._track_thread is not None:
@@ -345,8 +364,7 @@ class Stepper:
 
         if check_limits:
             self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
-            distance = min(max(self.position + distance, self._config['position_min']),
-                           self._config['position_max']) - self.position
+            distance = np.clip(self.position + distance, self._position_min, self._position_max) - self.position
             if distance == 0:
                 return TRIGGER_TIMEOUT
 
@@ -354,9 +372,9 @@ class Stepper:
         start_clock = self._mcu.host_clock_to_mcu_clock(start_time)
         step_dir = 1 if distance * speed > 0 else 0
 
-        _, enable_invert, _ = parse_pin(self._config['enable_pin'])
         if self._uart is None:
-            self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock, on_ticks=enable_invert)
+            self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
+                                   on_ticks=self._enable_pin_invert)
 
         self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir)
         self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
@@ -365,13 +383,12 @@ class Stepper:
             0, 0, 0, abs(distance), 0, speed)
 
         # Queue the coast phase as a single segment to avoid overloading the move queue
-        step = self._config['tracking_cadence']
         times = np.concatenate([
-            np.arange(0, accel_time, step),
-            np.arange(accel_time + coast_time, total_time + step, step)
+            np.arange(0, accel_time, self._tracking_cadence),
+            np.arange(accel_time + coast_time, total_time + self._tracking_cadence, self._tracking_cadence)
         ])
 
-        clocks = (times * self._mcu_freq).astype(int)
+        clocks = (times * self._mcu.mcu_freq).astype(int)
         steps = (move_fn(times) * self._steps_per_distance + 0.5).astype(int)
         for i in range(len(times) - 1):
             count = steps[i+1] - steps[i]
@@ -398,11 +415,10 @@ class Stepper:
         self._mcu.send_command('stepper_stop_on_trigger', oid=self._stepper_oid, trsync_oid=self._trigger_oid)
 
         if check_endstop:
-            sample_clocks = int(self._mcu_freq * ENDSTOP_SAMPLE_TIME)
-            rest_clocks = int(self._mcu_freq / (5 * speed * self._steps_per_distance) + 0.5)
+            sample_clocks = int(self._mcu.mcu_freq * ENDSTOP_SAMPLE_TIME)
+            rest_clocks = int(self._mcu.mcu_freq / (5 * speed * self._steps_per_distance) + 0.5)
 
-            _, endstop_inverted, _ = parse_pin(self._config['endstop_pin'])
-            endstop_value = 0 if endstop_inverted else 1
+            endstop_value = 0 if self._endstop_pin_invert else 1
             self._mcu.send_command('endstop_home', oid=self._endstop_oid, clock=start_clock, sample_ticks=sample_clocks,
                                    sample_count=ENDSTOP_SAMPLE_COUNT, rest_ticks=rest_clocks, pin_value=endstop_value,
                                    trsync_oid=self._trigger_oid, trigger_reason=TRIGGER_AT_LIMIT)
@@ -416,7 +432,7 @@ class Stepper:
         if self._uart is None:
             disable_clock = self._mcu.host_clock_to_mcu_clock(self._mcu.host_clock() + 0.1)
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid,
-                                   clock=disable_clock, on_ticks=not enable_invert)
+                                   clock=disable_clock, on_ticks=not self._enable_pin_invert)
         return trigger_status
 
     def home(self, blocking=True):
@@ -432,21 +448,21 @@ class Stepper:
 
         def inner():
             # Move quickly to endstop
-            distance_rough = self._config['position_min'] - self._config['position_max']
-            self._move(distance_rough, self._config['speed'], check_endstop=True, check_limits=False)
+            distance_rough = self._position_min - self._position_max
+            self._move(distance_rough, self._speed, check_endstop=True, check_limits=False)
 
             if self._stopped:
                 self._status = status
                 return
 
             # back off a bit
-            self._move(self._config['homing_backoff'], self._config['speed'] / 2, check_limits=False)
+            self._move(self._homing_backoff, self._speed / 2, check_limits=False)
 
             if self._stopped:
                 self._status = status
                 return
 
-            trigger_status = self._move(-2 * self._config['homing_backoff'], self._config['speed'] / 10,
+            trigger_status = self._move(-2 * self._homing_backoff, self._speed / 10,
                                         check_endstop=True, check_limits=False)
             if trigger_status == TRIGGER_AT_LIMIT:
                 self._pos_steps_at_origin = self._pos_steps
@@ -466,7 +482,7 @@ class Stepper:
         self._stopped = False
         self._status = StepperStatus.Moving
         def inner():
-            self._move(distance, self._config['speed'])
+            self._move(distance, self._speed)
             self._status = StepperStatus.Idle
 
         if blocking:
