@@ -449,26 +449,33 @@ class Stepper:
         def inner():
             # Move quickly to endstop
             distance_rough = self._position_min - self._position_max
-            self._move(distance_rough, self._speed, check_endstop=True, check_limits=False)
+            trigger = self._move(distance_rough, self._speed, check_endstop=True, check_limits=False)
 
-            if self._stopped:
+            if trigger == TRIGGER_MANUAL:
                 self._status = status
+                return
+
+            if trigger == TRIGGER_TIMEOUT:
+                self._status = StepperStatus.NotHomed
                 return
 
             # back off a bit
-            self._move(self._homing_backoff, self._speed / 2, check_limits=False)
-
-            if self._stopped:
+            trigger = self._move(self._homing_backoff, self._speed / 2, check_limits=False)
+            if trigger == TRIGGER_MANUAL:
                 self._status = status
                 return
 
-            trigger_status = self._move(-2 * self._homing_backoff, self._speed / 10,
+            trigger = self._move(-2 * self._homing_backoff, self._speed / 10,
                                         check_endstop=True, check_limits=False)
-            if trigger_status == TRIGGER_AT_LIMIT:
+            if trigger == TRIGGER_MANUAL:
+                self._status = status
+                return
+
+            if trigger == TRIGGER_AT_LIMIT:
                 self._pos_steps_at_origin = self._pos_steps
                 self._status = StepperStatus.Idle
             else:
-                self._status = status
+                self._status = StepperStatus.NotHomed
 
         if blocking:
             inner()
@@ -506,4 +513,3 @@ class Stepper:
     def stop(self):
         self._stopped = True
         self._mcu.send_command('trsync_trigger', oid=self._trigger_oid, reason=TRIGGER_MANUAL)
-
