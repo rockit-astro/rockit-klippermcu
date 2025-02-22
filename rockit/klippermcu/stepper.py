@@ -66,7 +66,7 @@ class StepperStatus:
 
 def parse_pin(value, parse_pullup=False, parse_invert=False):
     pullup = invert = 0
-    if len(value) > 0:
+    if value is not None and len(value) > 0:
         if value[0] in ['^', '~']:
             pullup = -1 if value[0] == '~' else 1
             value = value[1:]
@@ -435,9 +435,20 @@ class Stepper:
                                    clock=disable_clock, on_ticks=not self._enable_pin_invert)
         return trigger_status
 
+    def sync(self, position):
+        if self.has_endstop:
+            raise Exception('Cannot sync stepper that has an endstop')
+
+        if self._status not in [StepperStatus.Idle, StepperStatus.NotHomed]:
+            raise Exception('Cannot sync while moving')
+
+        # Ensure position is synchronised
+        self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
+        self._pos_steps_at_origin = self._pos_steps - position * self._steps_per_distance
+
     def home(self, blocking=True):
         if not self.has_endstop:
-            raise Exception('Cannot home stepper without endstop')
+            raise Exception('Cannot home stepper that does not have an endstop')
 
         self._stopped = False
         if self._status not in [StepperStatus.Idle, StepperStatus.NotHomed]:
