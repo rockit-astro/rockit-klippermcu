@@ -223,7 +223,7 @@ class Stepper:
 
         if self._uart is None:
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
-                                   on_ticks=self._enable_pin_invert)
+                                   on_ticks=int(not self._enable_pin_invert))
         self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
         self._mcu.send_command('trsync_start', oid=self._trigger_oid,
                                report_clock=0, report_ticks=0,
@@ -356,7 +356,7 @@ class Stepper:
         if self._uart is None:
             disable_clock = self._mcu.host_clock_to_mcu_clock(self._mcu.host_clock() + 0.1)
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=disable_clock,
-                                   on_ticks=not self._enable_pin_invert)
+                                   on_ticks=int(self._enable_pin_invert))
 
     def _move(self, distance, speed, check_endstop=False, check_limits=True):
         if self._track_thread is not None:
@@ -374,7 +374,7 @@ class Stepper:
 
         if self._uart is None:
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
-                                   on_ticks=self._enable_pin_invert)
+                                   on_ticks=int(not self._enable_pin_invert))
 
         self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir)
         self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
@@ -432,7 +432,7 @@ class Stepper:
         if self._uart is None:
             disable_clock = self._mcu.host_clock_to_mcu_clock(self._mcu.host_clock() + 0.1)
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid,
-                                   clock=disable_clock, on_ticks=not self._enable_pin_invert)
+                                   clock=disable_clock, on_ticks=int(self._enable_pin_invert))
         return trigger_status
 
     def sync(self, position):
