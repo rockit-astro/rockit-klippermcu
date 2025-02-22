@@ -92,7 +92,6 @@ class MCU:
 
         self.cmd_lock = threading.Lock()
         self.cmd_queue = self._lib.serialqueue_alloc_commandqueue()
-        self.cmd_ack_callbacks = {}
         self.cmd_response_callbacks = {}
 
         # Clock syncing state
@@ -138,13 +137,6 @@ class MCU:
             count = response.len
             if count < 0:
                 break
-
-            if response.notify_id:
-                with self.cmd_lock:
-                    cb = self.cmd_ack_callbacks.pop(response.notify_id, None)
-                    if cb is not None:
-                        cb.completed()
-                continue
 
             params = self.msgparser.parse(response.msg[0:count])
             params['#sent_time'] = response.sent_time
@@ -296,26 +288,6 @@ class MCU:
 
         return response
 
-    def send_query_async(self, command, **kwargs):
-        response = None
-        cond = threading.Condition()
-        def cb(r):
-            nonlocal response
-            with cond:
-                response = r
-                cond.notify()
-
-        def wait_func(timeout=5):
-            with cond:
-                if response is None:
-                    if not cond.wait(timeout):
-                        raise TimeoutError('Send timed out waiting for response')
-            return response
-
-        self.cmd_response_callbacks[(COMMAND_RESPONSES[command], kwargs.get('oid', None))] = cb
-        self.send_command(command, **kwargs)
-        return wait_func
-
     def register_response_callback(self, response, oid, cb):
         self.cmd_response_callbacks[(response, oid)] = cb
 
@@ -391,15 +363,15 @@ class MCU:
 
         self.send_command('finalize_config', crc=0)
 
-        for cb in self._post_init_callbacks:
-            cb()
-
         params = self.send_query('get_uptime')
         self.last_clock = (params['high'] << 32) | params['clock']
         self.clock_avg = self.last_clock
         self.time_avg = params['#sent_time']
         self.clock_est = (self.time_avg, self.clock_avg, self.mcu_freq)
         self.prediction_variance = (.001 * self.mcu_freq)**2
+
+        for cb in self._post_init_callbacks:
+            cb()
 
         self._configured = True
         return True
