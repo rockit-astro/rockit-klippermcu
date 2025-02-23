@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with rockit.  If not, see <http://www.gnu.org/licenses/>.
 
+from .adc import ADC
 from .mcu import MCU
-from .tmc_uart import TMCUART
+from .probes import RP2040Probe, ThermistorProbe
 from .stepper import Stepper, StepperStatus
+from .tmc_uart import TMCUART
