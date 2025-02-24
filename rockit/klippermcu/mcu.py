@@ -29,12 +29,14 @@ COMMAND_RESPONSES = {
     'get_uptime': 'uptime',
     'identify': 'identify_response',
     'stepper_get_position': 'stepper_position',
-    'tmcuart_send': 'tmcuart_response'
+    'tmcuart_send': 'tmcuart_response',
+    'i2c_read': 'i2c_read_response'
 }
 
 COMMAND_PROCESS_RESPONSE = {
     'stepper_position': lambda p: p['pos'],
-    'tmcuart_response': lambda p: p['read']
+    'tmcuart_response': lambda p: p['read'],
+    'i2c_read_response': lambda p: p['response']
 }
 
 RTT_AGE = .000010 / (60. * 60.)
