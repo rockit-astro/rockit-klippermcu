@@ -15,7 +15,8 @@
 # along with rockit.  If not, see <http://www.gnu.org/licenses/>.
 
 from .adc import ADC
+from .ds2484 import DS2484
 from .mcu import MCU
-from .probes import RP2040Probe, ThermistorProbe
+from .probes import RP2040Probe, ThermistorProbe, DS18B20Probe
 from .stepper import Stepper, StepperStatus
 from .tmc_uart import TMCUART

@@ -15,6 +15,8 @@
 # along with rockit.  If not, see <http://www.gnu.org/licenses/>.
 
 import math
+import threading
+import time
 from .adc import ADC
 
 class ThermistorProbe:
@@ -33,6 +35,30 @@ class ThermistorProbe:
         ln_r = math.log(r)
         inv_t = self._coeffs[0] + self._coeffs[1] * ln_r + self._coeffs[2] * ln_r**3
         return 1.0 / inv_t - 273.15
+
+
+class DS18B20Probe:
+    def __init__(self, mcu, ds2484, address, sample_cadence):
+        self._ds2484 = ds2484
+        self._address = address
+        self._sample_cadence = sample_cadence
+        self._last_measurement = None
+
+        def start():
+            threading.Thread(target=self._run_thread, daemon=True).start()
+        mcu.register_post_init_callback(start)
+
+    def _run_thread(self):
+        try:
+            while True:
+                self._last_measurement = self._ds2484.ds18b20_read(self._address)
+                time.sleep(self._sample_cadence)
+        except Exception:
+            pass
+
+    @property
+    def temperature(self):
+        return self._last_measurement
 
 
 class RP2040Probe:
