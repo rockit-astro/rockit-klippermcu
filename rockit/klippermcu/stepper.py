@@ -99,7 +99,7 @@ class Stepper:
         self._uart_run_current = uart_run_current
 
         self._step_pin = parse_pin(step_pin)
-        self._dir_pin = parse_pin(dir_pin)
+        self._dir_pin_invert, self._dir_pin = parse_pin(dir_pin, parse_invert=True)
         self._enable_pin_invert, self._enable_pin = parse_pin(enable_pin, parse_invert=True)
         self._endstop_pin_pullup, self._endstop_pin_invert, self._endstop_pin = parse_pin(
             endstop_pin, parse_pullup=True, parse_invert=True)
@@ -318,7 +318,7 @@ class Stepper:
                     step_dir = 1 if seg_end_steps >= last_steps else 0
                     step_sign = 1 if seg_end_steps >= last_steps else -1
                     if step_dir != last_dir:
-                        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir)
+                        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir ^ self._dir_pin_invert)
 
                     # Reset step clock if we have been paused, allowing
                     # for small rounding errors from the last segment
@@ -376,7 +376,7 @@ class Stepper:
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
                                    on_ticks=int(not self._enable_pin_invert))
 
-        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir)
+        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir ^ self._dir_pin_invert)
         self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
 
         move_fn, total_time, accel_time, coast_time, _ = self._build_trapezoidal_move(
