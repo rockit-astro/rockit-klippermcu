@@ -26,6 +26,7 @@ class ADC:
         self.last_measurement = None
 
         def configure():
+            self.last_measurement = None
             self._mcu.send_command('config_analog_in', oid=self._oid, pin=pin)
             self._adc_max = SAMPLE_COUNT * self._mcu.msgparser.get_constant_float('ADC_MAX')
 

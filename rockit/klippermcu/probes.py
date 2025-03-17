@@ -45,6 +45,7 @@ class DS18B20Probe:
         self._last_measurement = None
 
         def start():
+            self.last_measurement = None
             threading.Thread(target=self._run_thread, daemon=True).start()
         mcu.register_post_init_callback(start)
 
