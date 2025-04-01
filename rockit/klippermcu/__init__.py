@@ -18,6 +18,7 @@ from .adc import ADC
 from .ds2484 import DS2484
 from .gpio import OutputPin
 from .mcu import MCU
+from .neopixel import NeoPixel
 from .probes import RP2040Probe, ThermistorProbe, DS18B20Probe
 from .stepper import Stepper, StepperStatus
 from .tmc_uart import TMCUART

@@ -30,13 +30,15 @@ COMMAND_RESPONSES = {
     'identify': 'identify_response',
     'stepper_get_position': 'stepper_position',
     'tmcuart_send': 'tmcuart_response',
-    'i2c_read': 'i2c_read_response'
+    'i2c_read': 'i2c_read_response',
+    'neopixel_send': 'neopixel_result',
 }
 
 COMMAND_PROCESS_RESPONSE = {
     'stepper_position': lambda p: p['pos'],
     'tmcuart_response': lambda p: p['read'],
-    'i2c_read_response': lambda p: p['response']
+    'i2c_read_response': lambda p: p['response'],
+    'neopixel_result': lambda p: bool(p['success']),
 }
 
 RTT_AGE = .000010 / (60. * 60.)
