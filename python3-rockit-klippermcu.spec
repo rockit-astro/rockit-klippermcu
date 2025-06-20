@@ -1,6 +1,6 @@
 Name:           python3-rockit-klippermcu
 Version:        %{_version}
-Release:        1
+Release:        1%{dist}
 Summary:        Code to control a microcontroller running the Klipper firmware
 License:        GPL3
 Url:            https://github.com/rockit-astro/rockit-klippermcu
