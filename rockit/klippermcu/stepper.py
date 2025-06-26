@@ -523,6 +523,8 @@ class Stepper:
             else:
                 self._track_thread = None
 
-    def stop(self):
+    def stop(self, blocking=True):
         self._stopped = True
         self._mcu.send_command('trsync_trigger', oid=self._trigger_oid, reason=TRIGGER_MANUAL)
+        if blocking and self._track_thread is not None:
+            self._track_thread.join()
