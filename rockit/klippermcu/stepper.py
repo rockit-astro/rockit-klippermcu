@@ -97,12 +97,14 @@ class Stepper:
         self._uart_run_current = kwargs.get('uart_run_current', 0)
 
         self._step_pin = parse_pin(step_pin)
-        self._dir_pin_invert, self._dir_pin = parse_pin(dir_pin, parse_invert=True)
+        dir_pin_invert, self._dir_pin = parse_pin(dir_pin, parse_invert=True)
+        self._step_direction = (-1) ** dir_pin_invert
         self._enable_pin_invert, self._enable_pin = parse_pin(enable_pin, parse_invert=True)
 
         endstop_pin = kwargs.get('endstop_pin', None)
         self._endstop_pin_pullup, self._endstop_pin_invert, self._endstop_pin = parse_pin(
             endstop_pin, parse_pullup=True, parse_invert=True)
+        self._endstop_pos = kwargs.get('endstop_pos', 'min')
 
         self._stepper_oid = mcu.reserve_oid()
         self._enable_oid = mcu.reserve_oid()
@@ -139,7 +141,7 @@ class Stepper:
 
     @property
     def position(self):
-        return (self._pos_steps - self._pos_steps_at_origin) / self._steps_per_distance
+        return self._step_direction * (self._pos_steps - self._pos_steps_at_origin) / self._steps_per_distance
 
     @property
     def has_endstop(self):
@@ -302,11 +304,11 @@ class Stepper:
 
                 # Commit track segments to the MCU
                 while len(track_segments) and track_segments[0][0] < next_committed:
-                    last_clock, last_steps, last_dir = last_committed
+                    last_clock, last_steps, last_sign = last_committed
                     seg_start_time, seg_end_time, seg_end_pos, seg_status = track_segments.popleft()
                     self._track_status.append((seg_end_time, seg_status))
 
-                    seg_end_steps = int(seg_end_pos * self._steps_per_distance + self._pos_steps_at_origin + 0.5)
+                    seg_end_steps = int(seg_end_pos * self._step_direction * self._steps_per_distance + self._pos_steps_at_origin + 0.5)
                     count = abs(seg_end_steps - last_steps)
                     if count == 0:
                         continue
@@ -315,10 +317,9 @@ class Stepper:
                     end_clock = self._mcu.host_clock_to_mcu_clock(seg_end_time)
                     interval = 0
 
-                    step_dir = 1 if seg_end_steps >= last_steps else 0
-                    step_sign = 1 if seg_end_steps >= last_steps else -1
-                    if step_dir != last_dir:
-                        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir ^ self._dir_pin_invert)
+                    step_sign = (-1)**(seg_end_steps < last_steps)
+                    if step_sign != last_sign:
+                        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=(step_sign + 1) // 2)
 
                     # Reset step clock if we have been paused, allowing
                     # for small rounding errors from the last segment
@@ -340,7 +341,7 @@ class Stepper:
                         self._mcu.send_command('queue_step', oid=self._stepper_oid,
                                                interval=interval, count=count, add=0)
 
-                    last_committed = (last_clock + count * interval, last_steps + step_sign * count, step_dir)
+                    last_committed = (last_clock + count * interval, last_steps + step_sign * count, step_sign)
 
                 self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
                 with wait_condition:
@@ -370,13 +371,12 @@ class Stepper:
 
         start_time = self._mcu.host_clock() + START_DELAY
         start_clock = self._mcu.host_clock_to_mcu_clock(start_time)
-        step_dir = 1 if distance * speed > 0 else 0
-
+        step_sign = self._step_direction * (-1) ** (distance * speed < 0)
         if self._uart is None:
             self._mcu.send_command('queue_digital_out', oid=self._enable_oid, clock=start_clock,
                                    on_ticks=int(not self._enable_pin_invert))
 
-        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=step_dir ^ self._dir_pin_invert)
+        self._mcu.send_command('set_next_step_dir', oid=self._stepper_oid, dir=(step_sign + 1) // 2)
         self._mcu.send_command('reset_step_clock', oid=self._stepper_oid, clock=start_clock)
 
         move_fn, total_time, accel_time, coast_time, _ = self._build_trapezoidal_move(
@@ -456,10 +456,12 @@ class Stepper:
 
         status = self._status
         self._status = StepperStatus.Homing
+        home_direction = 1 if self._endstop_pos == 'max' else -1
+        home_pos = self._position_min if self._endstop_pos == 'min' else self._position_max
 
         def inner():
             # Move quickly to endstop
-            distance_rough = self._position_min - self._position_max
+            distance_rough = home_direction * (self._position_max - self._position_min)
             trigger = self._move(distance_rough, self._speed, check_endstop=True, check_limits=False)
 
             if trigger == TRIGGER_MANUAL:
@@ -471,19 +473,19 @@ class Stepper:
                 return
 
             # back off a bit
-            trigger = self._move(self._homing_backoff, self._speed / 2, check_limits=False)
+            trigger = self._move(-1 * home_direction * self._homing_backoff, self._speed / 2, check_limits=False)
             if trigger == TRIGGER_MANUAL:
                 self._status = status
                 return
 
-            trigger = self._move(-2 * self._homing_backoff, self._speed / 10,
+            trigger = self._move(2 * home_direction * self._homing_backoff, self._speed / 10,
                                         check_endstop=True, check_limits=False)
             if trigger == TRIGGER_MANUAL:
                 self._status = status
                 return
 
             if trigger == TRIGGER_AT_LIMIT:
-                self._pos_steps_at_origin = self._pos_steps
+                self._pos_steps_at_origin = self._pos_steps - self._step_direction * int(home_pos * self._steps_per_distance)
                 self._status = StepperStatus.Idle
             else:
                 self._status = StepperStatus.NotHomed
