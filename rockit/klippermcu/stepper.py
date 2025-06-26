@@ -315,7 +315,6 @@ class Stepper:
 
                     start_clock = self._mcu.host_clock_to_mcu_clock(seg_start_time)
                     end_clock = self._mcu.host_clock_to_mcu_clock(seg_end_time)
-                    interval = 0
 
                     step_sign = (-1)**(seg_end_steps < last_steps)
                     if step_sign != last_sign:
@@ -336,12 +335,14 @@ class Stepper:
                         last_steps += step_sign
                         count -= 1
 
-                    if count > 0:
-                        interval = int((end_clock - last_clock) / count)
-                        self._mcu.send_command('queue_step', oid=self._stepper_oid,
-                                               interval=interval, count=count, add=0)
-
+                    interval = max(int((end_clock - last_clock) / max(count, 1)), 1)
                     last_committed = (last_clock + count * interval, last_steps + step_sign * count, step_sign)
+                    while count > 0:
+                        # queue_step is limited to 16 bit counts
+                        c = min(count, 65535)
+                        self._mcu.send_command('queue_step', oid=self._stepper_oid,
+                                               interval=interval, count=c, add=0)
+                        count -= c
 
                 self._pos_steps = self._mcu.send_query('stepper_get_position', oid=self._stepper_oid)
                 with wait_condition:
