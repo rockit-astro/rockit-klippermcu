@@ -87,20 +87,20 @@ def parse_pin(value, parse_pullup=False, parse_invert=False):
 
 class Stepper:
     def __init__(self, mcu, uart, rotation_microsteps, rotation_distance,
-                 step_pin, dir_pin, enable_pin, endstop_pin,
-                 uart_address, uart_microsteps, uart_run_current,
-                 speed, acceleration, tracking_cadence, tracking_commit_buffer,
-                 position_min, position_max, homing_backoff):
+                 step_pin, dir_pin, enable_pin, speed, acceleration,
+                 position_min, position_max, **kwargs):
 
         self._mcu = mcu
         self._uart = uart
-        self._uart_address = uart_address
-        self._uart_microsteps = uart_microsteps
-        self._uart_run_current = uart_run_current
+        self._uart_address = kwargs.get('uart_address', 0)
+        self._uart_microsteps = kwargs.get('uart_microsteps', 0)
+        self._uart_run_current = kwargs.get('uart_run_current', 0)
 
         self._step_pin = parse_pin(step_pin)
         self._dir_pin_invert, self._dir_pin = parse_pin(dir_pin, parse_invert=True)
         self._enable_pin_invert, self._enable_pin = parse_pin(enable_pin, parse_invert=True)
+
+        endstop_pin = kwargs.get('endstop_pin', None)
         self._endstop_pin_pullup, self._endstop_pin_invert, self._endstop_pin = parse_pin(
             endstop_pin, parse_pullup=True, parse_invert=True)
 
@@ -112,11 +112,11 @@ class Stepper:
         self._speed = speed
         self._acceleration = acceleration
         self._steps_per_distance = rotation_microsteps / rotation_distance
-        self._tracking_cadence = tracking_cadence
-        self._tracking_commit_buffer = tracking_commit_buffer
+        self._tracking_cadence = kwargs.get('tracking_cadence', 0)
+        self._tracking_commit_buffer = kwargs.get('tracking_commit_buffer', 0)
         self._position_min = position_min
         self._position_max = position_max
-        self._homing_backoff = homing_backoff
+        self._homing_backoff = kwargs.get('homing_backoff', 0)
 
         self._status = StepperStatus.NotHomed
         self._pos_steps_at_origin = 0
