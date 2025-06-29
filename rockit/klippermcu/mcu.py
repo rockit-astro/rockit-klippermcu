@@ -160,6 +160,12 @@ class MCU:
                         if params['#name'] == 'stats':
                             continue
 
+                        # MCU has encountered an error
+                        if params['#name'] in ['shutdown', 'is_shutdown']:
+                            print(params)
+                            self._lib.serialqueue_exit(self._serial_queue)
+                            break
+
                         print('Unhandled response', params)
             except Exception:
                 print("Exception in serial callback")
