@@ -156,6 +156,10 @@ class MCU:
                         process = COMMAND_PROCESS_RESPONSE.get(params['#name'], default_process)
                         cb(process(params))
                     else:
+                        # Ignore stats packets
+                        if params['#name'] == 'stats':
+                            continue
+
                         print('Unhandled response', params)
             except Exception:
                 print("Exception in serial callback")
