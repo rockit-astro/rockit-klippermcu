@@ -72,7 +72,8 @@ class DS2484:
         self._onewire_reset()
         if address is not None:
             self._onewire_write(0x55)
-            for b in address:
+            for i in range(8):
+                b = int(address[2*i:2*(i+1)], 16)
                 self._onewire_write(b)
         else:
             self._onewire_write(0xCC)
