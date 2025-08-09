@@ -83,7 +83,7 @@ class DS2484:
             # Start a temperature conversion
             self._onewire_select(address)
             self._onewire_write(0x44)
-            time.sleep(0.75)
+            time.sleep(0.8)
 
             # Read scratchpad
             data = bytearray(9)
